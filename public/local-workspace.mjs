@@ -1,7 +1,7 @@
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const $=s=>document.querySelector(s);
 export class LocalWorkspace {
-  constructor(app){this.app=app;this.enabled=!!$('meta[name="framekeep-local"]');this.project=null;this.token='';this.queue=Promise.resolve();this.conflict=false;this.projects=[];this.task=null;}
+  constructor(app){this.app=app;this.enabled=!!$('meta[name="framekeep-local"]');this.project=null;this.token='';this.queue=Promise.resolve();this.conflict=false;this.projects=[];this.task=null;this.importWorkers='auto';}
   async request(path,body){
     const response=await fetch(path,{method:body===undefined?'GET':'POST',headers:body===undefined?{}:{'Content-Type':'application/json','X-Framekeep-Token':this.token},body:body===undefined?undefined:JSON.stringify(body)});
     const data=await response.json();if(!response.ok){const error=new Error(data.error||'本机请求失败');error.status=response.status;throw error;}return data;
@@ -21,7 +21,7 @@ export class LocalWorkspace {
   }
   installDialogs(){
     const container=document.createElement('div');container.innerHTML=`
-    <dialog id="folder-dialog" class="dialog"><div class="dialog-heading"><h2>选择照片文件夹</h2><button data-close class="icon-button">×</button></div><p>文件直接从本机读取。预览与记录存入程序缓存，不写入原片文件夹。</p><div class="path-row"><input id="folder-path" placeholder="例如 D:\\照片\\漫展" aria-label="照片文件夹完整路径"><button id="browse-source" class="button">浏览…</button></div><label class="check-row"><input id="recursive" type="checkbox" checked> 包含子文件夹</label><p class="muted">支持 Sony ARW / 常见 RAW / JPEG / PNG / WebP。RAW + 同名 JPEG 合并显示。</p><p id="folder-error" class="inline-error" role="alert"></p><div class="dialog-actions"><button class="button" data-close>取消</button><button id="scan-folder" class="button primary">读取文件夹 →</button></div></dialog>
+    <dialog id="folder-dialog" class="dialog"><div class="dialog-heading"><h2>选择照片文件夹</h2><button data-close class="icon-button">×</button></div><p>文件直接从本机读取。预览与记录存入程序缓存，不写入原片文件夹。</p><div class="path-row"><input id="folder-path" placeholder="例如 D:\\照片\\漫展" aria-label="照片文件夹完整路径"><button id="browse-source" class="button">浏览…</button></div><label class="check-row"><input id="recursive" type="checkbox" checked> 包含子文件夹</label><label class="performance-row">预览生成 <select id="import-workers" aria-label="预览生成并行数量"><option value="auto">自动推荐</option><option value="1">1 并行 · 省资源</option><option value="2">2 并行 · 均衡</option><option value="4">4 并行 · 更快</option><option value="8">8 并行 · 更多资源</option></select></label><p id="performance-hint" class="muted">自动根据 CPU 和可用内存推荐；手动增加并行会占用更多资源。</p><p class="muted">支持 Sony ARW / 常见 RAW / JPEG / PNG / WebP。RAW + 同名 JPEG 合并显示。</p><p id="folder-error" class="inline-error" role="alert"></p><div class="dialog-actions"><button class="button" data-close>取消</button><button id="scan-folder" class="button primary">读取文件夹 →</button></div></dialog>
     <dialog id="projects-dialog" class="dialog"><div class="dialog-heading"><h2>本机照片项目</h2><button data-close class="icon-button">×</button></div><div id="project-list"></div><p class="muted">项目之间独立保存候选与轮次。把程序 ZIP 发给同事即可，他们的照片和判断保留在各自电脑。</p><div class="dialog-actions"><button id="new-project" class="button primary">＋ 选择新文件夹</button></div></dialog>
     <dialog id="copy-dialog" class="dialog"><div class="dialog-heading"><h2>复制保留的原片</h2><button data-close class="icon-button">×</button></div><p id="copy-summary"></p><div class="path-row"><input id="target-path" placeholder="目标文件夹完整路径" aria-label="导出文件夹完整路径"><button id="browse-target" class="button">浏览…</button></div><label class="check-row"><input id="copy-paired" type="checkbox"> 同时复制同名配对 JPEG</label><label class="check-row"><input id="preserve-paths" type="checkbox" checked> 保留子文件夹结构</label><p class="muted">默认复制 ARW 等源文件；已有同名文件跳过，结果清单写入目标文件夹。请选择原片文件夹之外的位置。</p><p id="copy-error" class="inline-error" role="alert"></p><div class="dialog-actions"><button class="button" data-close>取消</button><button id="start-copy" class="button primary">开始复制 →</button></div></dialog>
     <dialog id="task-dialog" class="dialog"><div class="dialog-heading"><h2 id="task-title">正在读取照片</h2></div><p id="task-file" class="task-file"></p><progress id="task-progress" max="1" value="0"></progress><p id="task-count" role="status" aria-live="polite"></p><div id="task-result"></div><div class="dialog-actions"><button id="cancel-task" class="button">停止任务</button><button id="close-task" class="button primary" hidden>继续 →</button></div></dialog>
@@ -89,17 +89,22 @@ export class LocalWorkspace {
       $('#project-list').querySelectorAll('button').forEach(b=>b.onclick=()=>this.open(b.dataset.project).catch(e=>this.app.toast(e.message)));$('#projects-dialog').showModal();
     }catch(e){this.app.toast(e.message);}
   }
-  showFolder(rescan=false){$('#folder-error').textContent='';$('#folder-path').value=rescan?this.project?.root||'':'';$('#recursive').checked=rescan?this.project?.recursive!==false:true;$('#folder-dialog').showModal();}
+  showFolder(rescan=false){
+    $('#folder-error').textContent='';$('#folder-path').value=rescan?this.project?.root||'':'';$('#recursive').checked=rescan?this.project?.recursive!==false:true;
+    const value=String(rescan?this.project?.state.importWorkers??this.importWorkers:this.importWorkers);$('#import-workers').value=['auto','1','2','4','8'].includes(value)?value:'auto';
+    $('#folder-dialog').showModal();
+    this.request('/api/performance').then(info=>{$('#performance-hint').textContent=`自动建议 ${info.recommendedWorkers} 并行 · ${info.cpuThreads} 个 CPU 线程${info.availableMemoryGiB!==null?' · 当前可用内存约 '+info.availableMemoryGiB+' GB':''}。机械硬盘可先试 1–2 并行。`;}).catch(()=>{});
+  }
   async scan(){
     const button=$('#scan-folder');button.disabled=true;
-    try{await this.flush();const {jobId}=await this.request('/api/scan',{path:$('#folder-path').value,recursive:$('#recursive').checked});$('#folder-dialog').close();await this.watch(jobId,'scan');}
+    try{this.importWorkers=$('#import-workers').value||'auto';await this.flush();const {jobId}=await this.request('/api/scan',{path:$('#folder-path').value,recursive:$('#recursive').checked,workers:this.importWorkers});$('#folder-dialog').close();await this.watch(jobId,'scan');}
     catch(e){$('#folder-error').textContent=e.message;this.app.toast(e.message);}finally{button.disabled=false;}
   }
   async watch(id,kind){
     this.task=id;this.app.busy(true);$('#task-title').textContent=kind==='scan'?'读取照片与生成预览':'复制保留的原片';$('#task-result').innerHTML='';$('#close-task').hidden=true;$('#cancel-task').hidden=false;$('#cancel-task').disabled=false;$('#task-file').textContent='准备中…';$('#task-count').textContent='';$('#task-progress').removeAttribute('value');$('#task-dialog').showModal();
     try{
       let job;
-      while(true){job=await this.request(`/api/jobs/${id}`);$('#task-file').textContent=job.message;$('#task-progress').max=job.total||1;if(job.total)$('#task-progress').value=job.done;$('#task-count').textContent=`${job.done} / ${job.total||'查找中'}${job.kind==='scan'?' · 顺序处理，限制内存占用':''}`;if(job.finished)break;await new Promise(r=>setTimeout(r,400));}
+      while(true){job=await this.request(`/api/jobs/${id}`);$('#task-file').textContent=job.message;$('#task-progress').max=job.total||1;if(job.total)$('#task-progress').value=job.done;$('#task-count').textContent=`${job.done} / ${job.total||'查找中'}${job.kind==='scan'?` · ${job.workers||1} 并行${job.imagesPerSecond?' · '+job.imagesPerSecond+' 张/秒':''}${job.elapsedSeconds?' · 已用 '+job.elapsedSeconds+' 秒':''}`:''}`;if(job.finished)break;await new Promise(r=>setTimeout(r,400));}
       this.task=null;this.app.busy(false);
       if(kind==='scan'&&!job.error){
         // Scan already flushed and incremented the revision. Don't send the old state back.

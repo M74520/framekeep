@@ -21,6 +21,8 @@ try {
   browser=await chromium.launch({headless:true,...(process.env.FRAMEKEEP_CHROME_PATH?{executablePath:process.env.FRAMEKEEP_CHROME_PATH}: {})});
   const page=await browser.newPage({viewport:{width:1600,height:1080}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(url);await page.locator('#import-button').click();
+  await page.getByText(/自动建议 .* 并行/).waitFor();await page.selectOption('#import-workers','4');
+  await fs.mkdir('artifacts',{recursive:true});await page.screenshot({path:'artifacts/import-performance.png'});
   // Exercise waiting, cancellation and failure without blocking on native OS UI.
   await page.route('**/api/choose-folder',async route=>{await new Promise(r=>setTimeout(r,150));await route.fulfill({json:{path:''}});});
   await page.locator('#browse-source').click();assert.equal(await page.locator('#browse-source').textContent(),'选择中…');await page.getByText('已取消选择，可重新浏览或直接粘贴路径。').waitFor();
@@ -36,6 +38,7 @@ try {
   const ids=()=>page.locator('.grid-card').evaluateAll(cards=>cards.map(c=>c.dataset.gridId));
   const state=()=>page.evaluate(async()=>{const b=await(await fetch('/api/bootstrap')).json();return (await(await fetch('/api/projects/'+b.projects[0].id)).json()).state;});
   const saved=async()=>{await page.waitForFunction(()=>document.querySelector('#save-state').textContent.includes('✓'));return state();};
+  assert.equal(String((await state()).importWorkers),'4');
   await page.locator('.grid-photo img').first().evaluate(img=>img.removeAttribute('src'));
   await page.locator('[data-grid-action="confirm"]').click();await page.getByText('本页预览尚未全部显示，请加载完成后确认；无法读取的照片可先标为待定。').waitFor();
   assert((await state()).photos.every(p=>p.status==='pending'),'A missing preview must not be rejected without being displayed');

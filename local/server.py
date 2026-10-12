@@ -15,12 +15,14 @@ import sys
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, unquote
 import webbrowser
 os.environ.setdefault('OMP_NUM_THREADS','2')
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from imaging import RAW, RASTER, metadata, previews, read_image
+from performance import import_performance, resolve_workers
 
 ROOT = Path(__file__).resolve().parent.parent
 STATUSES = {'pending','keep','reject','unsure'}
@@ -156,18 +158,22 @@ class Store:
         threading.Thread(target=run,daemon=True).start()
         return jid
 
-    def start_scan(self, folder, recursive=True):
+    def start_scan(self, folder, recursive=True, workers='auto'):
+        requested_workers=workers
+        workers=resolve_workers(workers)
         root=Path(folder.strip().strip('"')).expanduser().resolve()
         if not root.is_dir(): raise ValueError('文件夹不存在，请输入本机的完整路径')
         if root == self.directory or root.is_relative_to(self.directory): raise ValueError('请选择照片文件夹，而不是程序缓存文件夹')
         pid=hashlib.sha256(os.path.normcase(str(root)).encode()).hexdigest()[:24]
         with self.lock:
+            if any(j['kind']=='scan' and j.get('projectId')==pid and not j['finished'] for j in self.jobs.values()):
+                raise Conflict('这个项目正在读取，请等待完成或停止当前任务')
             if not self.query('SELECT id FROM projects WHERE id=?',(pid,)):
                 self.db.execute('INSERT INTO projects VALUES(?,?,?,?,?,?,?)',(pid,str(root),root.name,json.dumps(empty_state()),0,time.time(),int(recursive)));self.db.commit()
-        return self.job('scan',lambda j:self.scan(j,root,pid,recursive),projectId=pid)
+            return self.job('scan',lambda j:self.scan(j,root,pid,recursive,workers),projectId=pid,workers=workers,requestedWorkers=requested_workers)
 
-    def scan(self, job, root, pid, recursive):
-        # Sequential processing bounds memory and keeps culling fast after the initial scan.
+    def scan(self, job, root, pid, recursive, workers=1):
+        started=time.monotonic()
         all_files={}; job['message']='正在查找照片…'
         for directory, dirs, files in os.walk(root,followlinks=False):
             dirs[:]=sorted(d for d in dirs if not (Path(directory)/d).is_symlink() and (Path(directory)/d).resolve() != self.directory)
@@ -191,36 +197,55 @@ class Store:
                 if paired: raw_pairs[relative]=paired;skip.add(paired)
         files=[(rel,p) for rel,p in all_files.items() if rel not in skip]
         job['total']=len(files)
-        successful={}; added=[]; job['reused']=0
-        for relative,path in files:
-            if job['cancelled']: break
+        completed_records={}; job['reused']=0
+        def process_file(item):
+            relative,path=item
             photo_id=hashlib.sha256(relative.encode()).hexdigest()[:24]
-            job['message']=relative
-            try:
-                stat=path.stat(); pair=raw_pairs.get(relative)
-                pair_stat=all_files[pair].stat() if pair else None
-                fingerprint=f'{relative}|{stat.st_size}|{stat.st_mtime_ns}|{pair_stat.st_size if pair else 0}|{pair_stat.st_mtime_ns if pair else 0}'
-                key=hashlib.sha256(fingerprint.encode()).hexdigest()
-                cache=self.cache/pid/photo_id/key
-                if old_records.get(photo_id,{}).get('cacheKey')==key and (cache/'preview.jpg').exists() and (cache/'thumb.jpg').exists():
-                    record=old_records[photo_id]; job['reused']+=1
-                else:
-                    meta=metadata(path)
-                    info=previews(path,cache,meta,all_files[pair] if pair else None)
-                    record=dict(id=photo_id,name=path.name,path=relative,size=stat.st_size,mtimeNs=stat.st_mtime_ns,lastModified=stat.st_mtime_ns//1_000_000,
-                        key=f'{relative}|{stat.st_size}|{stat.st_mtime_ns//1_000_000}',cacheKey=key,time=meta.get('time',stat.st_mtime_ns//1_000_000),timeSource='exif' if meta.get('time') else 'modified',
-                        camera=meta.get('model',''),raw=path.suffix.lower() in RAW,pairedPath=pair,pairStat=[pair_stat.st_size,pair_stat.st_mtime_ns] if pair else None,**info)
-                successful[photo_id]=record
-                if photo_id not in old: added.append(photo_id)
-            except Exception as exc:
-                job['errors'].append({'file':relative,'reason':str(exc)})
-            job['done']+=1
+            stat=path.stat(); pair=raw_pairs.get(relative)
+            pair_stat=all_files[pair].stat() if pair else None
+            fingerprint=f'{relative}|{stat.st_size}|{stat.st_mtime_ns}|{pair_stat.st_size if pair else 0}|{pair_stat.st_mtime_ns if pair else 0}'
+            key=hashlib.sha256(fingerprint.encode()).hexdigest()
+            cache=self.cache/pid/photo_id/key
+            reused=old_records.get(photo_id,{}).get('cacheKey')==key and (cache/'preview.jpg').exists() and (cache/'thumb.jpg').exists()
+            if reused:record=old_records[photo_id]
+            else:
+                meta=metadata(path)
+                info=previews(path,cache,meta,all_files[pair] if pair else None)
+                record=dict(id=photo_id,name=path.name,path=relative,size=stat.st_size,mtimeNs=stat.st_mtime_ns,lastModified=stat.st_mtime_ns//1_000_000,
+                    key=f'{relative}|{stat.st_size}|{stat.st_mtime_ns//1_000_000}',cacheKey=key,time=meta.get('time',stat.st_mtime_ns//1_000_000),timeSource='exif' if meta.get('time') else 'modified',
+                    camera=meta.get('model',''),raw=path.suffix.lower() in RAW,pairedPath=pair,pairStat=[pair_stat.st_size,pair_stat.st_mtime_ns] if pair else None,**info)
+            return record,bool(reused)
+        # Submit only N tasks, not the entire thousand-photo batch. Completed
+        # records are merged in original order and only this controller writes DB.
+        with ThreadPoolExecutor(max_workers=workers,thread_name_prefix='framekeep-preview') as pool:
+            pending={}; next_index=0
+            def fill():
+                nonlocal next_index
+                while len(pending)<workers and next_index<len(files) and not job['cancelled']:
+                    index=next_index;next_index+=1;pending[pool.submit(process_file,files[index])]=index
+            fill()
+            while pending:
+                if job['cancelled']:
+                    for future in pending:future.cancel()
+                done,_=wait(pending,timeout=.1,return_when=FIRST_COMPLETED)
+                for future in sorted(done,key=lambda f:pending[f]):
+                    index=pending.pop(future)
+                    if future.cancelled():continue
+                    job['message']=files[index][0]
+                    try:
+                        record,reused=future.result();completed_records[index]=record;job['reused']+=int(reused)
+                    except Exception as exc:job['errors'].append({'file':files[index][0],'reason':str(exc)})
+                    job['done']+=1;job['elapsedSeconds']=round(time.monotonic()-started,2)
+                    job['imagesPerSecond']=round(job['done']/max(.001,job['elapsedSeconds']),1)
+                fill()
+        successful={completed_records[i]['id']:completed_records[i] for i in sorted(completed_records)}
         # Keep missing/failed previous photos recoverable, with explicit availability markers.
         merged=[]; changed_ids=set()
         for p in previous['photos']:
             record=successful.pop(p['id'],None)
             changed=record and (record['size'],record['mtimeNs']) != (p['size'],p['mtimeNs'])
-            merged.append({**p,**(record or {}),'missing':record is None,**({'status':'pending','roundIncluded':True} if changed else {})})
+            missing=(record is None) if not job['cancelled'] else (p.get('missing',False) if record is None and p['path'] in all_files else record is None)
+            merged.append({**p,**(record or {}),'missing':missing,**({'status':'pending','roundIncluded':True} if changed else {})})
             if changed: changed_ids.add(p['id'])
         for record in successful.values(): merged.append({**record,'status':'pending','roundIncluded':True,'missing':False})
         known=set(p['id'] for p in merged)
@@ -234,13 +259,15 @@ class Store:
         if new_ids:
             previous['groups'].append({'id':'import-'+secrets.token_hex(6),'name':'新导入照片','ids':new_ids})
         previous['demo']=False
+        previous['importWorkers']=job.get('requestedWorkers','auto')
         all_records={p['id']:{k:v for k,v in p.items() if k not in {'status','roundIncluded','missing'}} for p in merged}
         with self.lock:
             self.db.execute('UPDATE projects SET state=?,revision=revision+1,updated=?,recursive=? WHERE id=?',(json.dumps(previous,ensure_ascii=False),time.time(),int(recursive),pid))
             for photo_id,record in all_records.items():
                 self.db.execute('INSERT OR REPLACE INTO photos VALUES(?,?,?)',(pid,photo_id,json.dumps(record,ensure_ascii=False)))
             self.db.commit()
-        job.update(added=len(new_ids),changed=len(changed_ids),missing=sum(p['missing'] for p in merged),count=len(merged),message=f'已读取 {len(merged)} 张照片')
+        elapsed=time.monotonic()-started
+        job.update(added=len(new_ids),changed=len(changed_ids),missing=sum(p['missing'] for p in merged),count=len(merged),elapsedSeconds=round(elapsed,2),imagesPerSecond=round(job['done']/max(.001,elapsed),1),message=f'已读取 {len(merged)} 张照片')
 
     def image(self, pid, photo_id, kind):
         project=self.project(pid); record=self.record(pid,photo_id)
@@ -355,6 +382,7 @@ class Handler(BaseHTTPRequestHandler):
             store=self.server.store;parts=path.strip('/').split('/')
             if path=='/api/bootstrap': return self.send(200,{'token':self.server.token,'projects':store.listing(),'dataDir':str(store.directory),'rawDecode':importlib.util.find_spec('rawpy') is not None},cookie=True)
             if path=='/api/projects': return self.send(200,{'projects':store.listing()})
+            if path=='/api/performance': return self.send(200,import_performance())
             if len(parts)==3 and parts[:2]==['api','projects']:return self.send(200,store.project(parts[2]))
             if len(parts)==3 and parts[:2]==['api','jobs']:
                 with store.lock:job=dict(store.jobs.get(parts[2],{}))
@@ -381,7 +409,7 @@ class Handler(BaseHTTPRequestHandler):
             body=json.loads(self.rfile.read(length) or b'{}')
             path=urlsplit(self.path).path;parts=path.strip('/').split('/');store=self.server.store
             if path=='/api/choose-folder':return self.send(200,{'path':choose_folder()})
-            if path=='/api/scan':return self.send(200,{'jobId':store.start_scan(str(body.get('path','')),bool(body.get('recursive',True)))})
+            if path=='/api/scan':return self.send(200,{'jobId':store.start_scan(str(body.get('path','')),bool(body.get('recursive',True)),body.get('workers','auto'))})
             if len(parts)==4 and parts[:2]==['api','projects']:
                 if parts[3]=='state':return self.send(200,{'revision':store.save_state(parts[2],body['state'],body['revision'])})
                 if parts[3]=='export':return self.send(200,{'jobId':store.start_export(parts[2],str(body.get('target','')),body.get('ids',[]),bool(body.get('paired')),bool(body.get('preserve',True)))})
