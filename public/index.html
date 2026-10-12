@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark"><meta name="description" content="私有漫展照片筛选工作台。候选擂台、并排对比、多轮筛选。照片只在你的浏览器本地处理。">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <title>留影 2.2 · 漫展照片筛选</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/local.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="留影首页"><span class="brand-mark">▧</span><strong>留影</strong><span class="brand-en">FRAMEKEEP</span></a>
+    <div class="private-tag"><span class="status-dot"></span>私有工作台 <span class="tag-divider">/</span> 照片留在本机</div>
+    <div class="header-actions"><span id="save-state" class="save-state">本地自动保存</span><button id="help-button" class="icon-button" aria-label="快捷键与使用说明">?</button><button id="import-button" class="button primary small">＋ 导入照片</button></div>
+  </header>
+  <input id="file-input" type="file" accept="image/jpeg,image/png,image/webp,image/avif,image/gif,image/bmp,.jpg,.jpeg,.png,.webp,.avif,.gif,.bmp" multiple hidden>
+  <input id="progress-input" type="file" accept="application/json,.json" hidden>
+  <main id="app"></main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="drop-overlay" class="drop-overlay" hidden><div><span>＋</span><h2>放下照片，开始筛选</h2><p>本地生成预览 · 原片不变</p></div></div>
+  <dialog id="help-dialog" class="dialog"><div class="dialog-heading"><h2>手比鼠标更快</h2><button class="icon-button" data-close aria-label="关闭">×</button></div><p class="muted">点击一张照片，让它成为操作对象。快捷键只在工作台生效。</p><div class="key-list"><div><kbd>←</kbd><kbd>→</kbd><span>浏览挑战者</span></div><div><kbd>1</kbd><span>保留，并加入候选</span></div><div><kbd>2</kbd><span>淘汰当前照片</span></div><div><kbd>3</kbd><span>待定，留待下一轮</span></div><div><kbd>Q</kbd><span>选择左侧候选</span></div><div><kbd>E</kbd><span>选择右侧挑战者</span></div><div><kbd>W</kbd><span>挑战者胜出，替换左侧候选</span></div><div><kbd>B</kbd><span>两张都保留</span></div><div><kbd>Space</kbd><span>跳到下一张</span></div><div><kbd>Ctrl</kbd><kbd>Z</kbd><span>撤销（Mac：⌘ Z）</span></div><div><kbd>↑</kbd><kbd>↓</kbd><span>切换分组</span></div></div><div class="help-note"><strong>每一轮，都可以重新比较。</strong><p>下一轮包含“保留、待定、未评”的照片。历史判断会存为快照，进入新一轮后重置为未评；候选继续留在擂台，直到你更换它。</p><p>支持 JPEG / PNG / WebP 等浏览器可解码的图片。RAW 请先生成 JPEG 缩略图。时间优先读取 JPEG 拍摄时间，缺失时使用文件修改时间。相近画面采用本地视觉近似匹配，可调节或手动修正。</p><p>仅保存压缩预览和筛选记录到本浏览器；不上传照片、不写入原片。导出进度 JSON 可备份判断，跨浏览器使用时需重新导入照片。导出的 JSON 和 CSV 包含原文件名及拍摄时间，请按个人资料保管。</p></div></dialog>
+  <dialog id="round-dialog" class="dialog compact"><div class="dialog-heading"><h2>让好照片再比一轮</h2><button class="icon-button" data-close aria-label="关闭">×</button></div><p id="round-description"></p><div class="help-note">保留当前判断的快照，把下一轮照片重置为未评。已有候选继续陪你比较，淘汰照片仍可在“全部照片”里找回。</div><div class="dialog-actions"><button class="button" data-close>继续这一轮</button><button id="confirm-round" class="button primary">开启下一轮 →</button></div></dialog>
+  <dialog id="reset-dialog" class="dialog compact"><div class="dialog-heading"><h2>清空这个本地项目？</h2><button class="icon-button" data-close aria-label="关闭">×</button></div><p>将清除本浏览器里的预览和筛选记录。你的原片不会被删除或修改。</p><p class="muted">建议先在“导出”中备份进度 JSON。</p><div class="dialog-actions"><button class="button" data-close>取消</button><button id="confirm-reset" class="button danger">清空本地项目</button></div></dialog>
+  <dialog id="history-dialog" class="dialog"><div class="dialog-heading"><h2>每一轮的判断</h2><button class="icon-button" data-close aria-label="关闭">×</button></div><div id="history-content"></div></dialog>
+  <dialog id="export-dialog" class="dialog compact"><div class="dialog-heading"><h2>把选择带走</h2><button class="icon-button" data-close aria-label="关闭">×</button></div><p class="muted">导出只包含文件名与判断，不复制或移动原片。</p><button class="export-option" data-export="keep"><span>✓</span><div><strong>保留照片文件名</strong><small>TXT · 用于回到原片文件夹查找</small></div><b>↗</b></button><button class="export-option" data-export="csv"><span>▦</span><div><strong>完整筛选清单</strong><small>CSV · 文件名、分组、拍摄时间、当前判断</small></div><b>↗</b></button><button class="export-option" data-export="progress"><span>↺</span><div><strong>进度备份</strong><small>JSON · 候选、多轮判断，可重新导入</small></div><b>↗</b></button><button id="restore-progress" class="button full">导入进度 JSON</button></dialog>
+  <link rel="stylesheet" href="/grid.css">
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

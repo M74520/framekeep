@@ -1,0 +1,78 @@
+# 本机版验证结果
+
+## 2.2.0 自适应排版 · 2026-10-12
+
+本次在 Windows + Chrome 无头浏览器、专用 Python 3.12 环境验证。
+
+- 13 项 JavaScript 核心测试：原有筛选逻辑，以及横竖宽高识别、90° 旋转、视口布局约束、完整构图比例和拍摄顺序保留。
+- `tests/adaptive_ui.mjs`：4 张竖图在每页 6 张模式自动排成一行；8 张横竖方图混排；带 EXIF 方向的 JPEG 正确校正；图像显示边界与卡片边界匹配、无额外黑边或裁剪；旋转、撤销、刷新恢复和旋转后的精细比较；1280×800、1920×1080、760×900 窗口排版与确认按钮可见。
+- `tests/grid_ui.mjs`：原有网格整页确认、跨页候选、撤销、待定、同步比较、复制和轮次流程回归。
+- 手动旋转仅修改项目内 `grid.rotations`，不修改源文件或源方向元数据。
+- `docs/images/` 的图片来自合成测试素材，不是用户照片。
+
+真实 A7C II 传感器 RAW 解码画质及首次安装下载沿用此前限制，本次没有新增验证。
+
+## 2.1.0 网格改版 · 2026-10-12
+
+本次环境：Windows，Node.js 24，整合包已安装的 Python 3.12 运行环境，系统 Chrome 无头浏览器。所有测试使用临时项目和合成照片，不读取用户照片项目。
+
+- `node --test tests/core.test.mjs tests/grid.test.mjs`：10 / 10 通过，覆盖原有核心逻辑、当前页作用范围、待定保护、固定分页、跨页候选和轮次会话隔离。
+- `python -m unittest discover -s tests -p '*_test.py' -v`：10 / 10 通过，其中 8 项原有后端集成检查、2 项文件夹选择器返回值与失败分支检查。
+- `node tests/grid_ui.mjs`：真实本机 HTTP 服务 + Chrome，20 张 600×900 合成 JPEG。覆盖 4/6/8 张网格、数字键、整页确认、不跳过未看照片、整批撤销、待定、跨页候选、2/4 张比较、同步缩放和拖动、原尺寸和真实 100% 像素比例、复核、刷新恢复、复制原片、下一轮和擂台切换。另测浏览按钮等待 / 取消 / 失败反馈，以及 1280×800 屏幕确认按钮可见和无横向溢出。
+- `node tests/local_ui_smoke.mjs`：旧候选擂台、原尺寸窗口、保存恢复、复制和重新扫描通过；修正 Windows 测试清理时未等待服务退出造成的 SQLite 文件锁竞争。
+- `node tests/local_controller.mjs`：原有控制器、实际快捷键、项目保存、轮次、复制及陈旧页面冲突检查通过。
+- 界面截图：`artifacts/grid-1280.png`、`grid-eight.png`、`grid-review.png`、`grid-compare.png`；已人工查看 4/8 张网格和对比布局。
+
+本次未验证：真实 Sony A7C II 传感器 RAW 的完整解码画质、Windows 首次下载依赖、系统文件夹窗口的人工选择与前台显示。选择器测试模拟进程结果和 HTTP 响应；不等于实测系统窗口。原尺寸对比使用 JPEG 实测，RAW 延用现有接口，顺序发起解码。
+
+以下为旧版历史记录，千张性能数字没有在 2.1.0 重新测量。
+
+验证日期：2026-10-10。运行环境：Linux、Python 3.12、Node.js 24、Pillow 12.3。
+
+## 2.0.1 启动修复
+
+用户 Windows 实机已成功安装 Pillow、NumPy 和 rawpy，随后 2.0.0 的 `python -c` 检查因 PowerShell 丢失字符串引号而失败。2.0.1 将检查移入 `local/check_runtime.py`，启动时传入文件路径；检测已安装组件成功后直接复用，避免重复下载。
+
+本次检查了 Python 语法、缺少组件时的错误返回和更新包内容。当前环境没有 Windows PowerShell，尚未实测修复后的 Windows 启动；此前本机筛选流程测试结果见下文。
+
+## 已通过
+
+- **7 项筛选核心测试**：时间分组、视觉分组、候选替换、下一轮范围、EXIF、CSV 转义及图片尺寸。
+- **8 项后端集成测试**：真实 HTTP 请求，文件夹递归，构造 ARW 的内嵌 JPEG 与旋转，RAW/JPEG 配对，项目重启恢复，缓存复用，原文件缺失恢复，改变的原片重置判断，停止扫描，复制防覆盖与源文件哈希 / 修改时间检查。
+- **应用控制器完整流程**：执行实际 `app.js` 键盘事件和 `LocalWorkspace` 控制器，连接实际 Python HTTP 服务；从文件夹导入开始，保留、候选替换、撤销、两张都留、待定、淘汰、保存恢复、新一轮、复制导出、再次扫描及陈旧页面冲突均通过。此测试使用 DOM 替身，验证行为与状态，不验证浏览器布局。
+- JS / Python / Shell 语法检查，静态构建与 Git whitespace 检查通过。
+
+## 千张规模测试
+
+1000 张 800 × 1200 的纯色合成 JPEG，本机后端顺序生成预览：
+
+| 指标 | 结果 |
+| --- | ---: |
+| 首次读取与生成预览 | 14.77 秒 |
+| 再次扫描 | 0.13 秒 |
+| 复用预览 | 1000 / 1000 |
+| 预览缓存 | 16.21 MiB |
+| 后端进程峰值 RSS | 40.52 MiB |
+| 读取错误 | 0 |
+
+纯色 JPEG 压缩率高。上述缓存大小、速度和内存不代表真实漫展照片、相机 RAW 或 Windows 性能；也不包含浏览器内存。实际高分辨率 RAW 细节解码的资源占用会更高。
+
+## 尚未运行
+
+- 真实 Sony A7C II / ILCE-7CM2 ARW 传感器数据的 LibRaw 全尺寸解码。
+- Windows 首次下载、专用 Python 启动和原生文件夹窗口。
+- 本机新版 Playwright 浏览器 UI 测试和布局截图。运行尝试因缺少 Chromium 可执行文件而中止。
+
+当前环境外网下载被阻止，无法安装 rawpy、下载真实 ARW 或浏览器二进制。构造 ARW 测试只包含 TIFF/EXIF/JPEG 预览，没有真实传感器马赛克。代码使用 rawpy 0.27.1 的 RawPy.open_file / extract_thumb / unpack / postprocess API；首次启动会自动安装这个解码组件。
+
+## 复验命令
+
+```sh
+node --test tests/core.test.mjs
+python -m unittest discover -s tests -p '*_test.py' -v
+node tests/local_controller.mjs
+# 环境安装 Playwright / Chromium 后
+node tests/local_ui_smoke.mjs
+```
+
+第一次在相机原片文件夹中试用十几张，检查横竖图、时间分组、100% 细节和复制结果，再开始整场照片。保留原片校验与不覆盖规则始终生效。

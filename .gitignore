@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+node_modules/
+.venv/
+dist/
+artifacts/
+cache/
+runtime*/
+*.sqlite3*
+*.zip
+.env
+.env.*
