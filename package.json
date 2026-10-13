@@ -1,12 +1,13 @@
 {
   "name": "cosplay-photo-arena",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
     "test": "node --test tests/core.test.mjs tests/grid.test.mjs tests/layout.test.mjs",
     "test:adaptive": "node tests/adaptive_ui.mjs",
+    "test:sidebar": "node tests/sidebar_ui.mjs",
     "test:grid": "node tests/grid_ui.mjs",
     "start": "python local/server.py",
     "start:static": "python -m http.server 4173 --directory public",

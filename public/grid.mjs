@@ -28,3 +28,11 @@ export function applyPage(state, group, displayedIds, selectedIds, status='keep'
   }
   state.candidates[group.id]=[...candidates];
 }
+
+export function groupProgress(state,group,byId=new Map(state.photos.map(p=>[p.id,p])),roundIds=new Set(state.roundIds)) {
+  const photos=group.ids.filter(id=>roundIds.has(id)).map(id=>byId.get(id)).filter(Boolean);
+  const total=photos.length,pending=photos.filter(p=>p.status==='pending').length,unsure=photos.filter(p=>p.status==='unsure').length,kept=photos.filter(p=>p.status==='keep').length;
+  const reviewed=total-pending;
+  const status=!total?'inactive':!reviewed?'untouched':pending?'progress':unsure?'review':'complete';
+  return {total,reviewed,pending,unsure,kept,status};
+}

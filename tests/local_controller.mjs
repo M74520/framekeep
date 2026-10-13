@@ -13,7 +13,7 @@ globalThis.document={querySelector:s=>s==='dialog[open]'?null:(nodes.has(s)?node
 globalThis.window={addEventListener(){}};globalThis.IntersectionObserver=class{observe(){}disconnect(){}unobserve(){}};
 const {LocalWorkspace}=await import('../public/local-workspace.mjs');
 const source=await fs.readFile('public/app.js','utf8');
-const code=source.replace(/^import .*;\r?\n/gm,'').replace('renderWelcome();await initStorage();','').replace('decorateGrid();hydrateImages();','hydrateImages();');
+const code=source.replace(/^import .*;\r?\n/gm,'').replace('renderWelcome();await initStorage();','').replace('decorateGroups();decorateGrid();hydrateImages();','hydrateImages();').replace('const previousList=$(\'.group-list\'),scope=sidebarScope();','const previousList=null,scope=sidebarScope();').replace('const list=$(\'.group-list\');if(list){','const list=null;if(list){');
 const app=new Function('LocalWorkspace','core',`const {${Object.keys(core).join(',')}}=core;\n${code}\nreturn {local,load:s=>{state=s;undoStack=[];normalizeSelection();render();},state:()=>state,flush:()=>local.flush(),confirmRound,regroup};`)(LocalWorkspace,core);
 app.local.decorateWelcome=()=>{};app.local.decorateWorkspace=()=>{};
 
